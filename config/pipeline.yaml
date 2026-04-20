@@ -1,0 +1,28 @@
+# SensorExpress pipeline configuration
+
+# ── MQTT broker ────────────────────────────────────────────────────────────
+mqtt_host:          "localhost"
+mqtt_port:          1883
+mqtt_topic_pattern: "sensors/+/data"
+client_id:          "sensor_express"
+
+# ── Real-time processor ────────────────────────────────────────────────────
+rt_priority: 80        # SCHED_FIFO priority (1–99; 80 reserves headroom for IRQ threads)
+rt_cpu:       1        # Logical CPU to pin the RT thread to (0-indexed)
+deadline_ms:  5        # Hard cycle deadline in milliseconds
+
+# ── Anomaly / alert thresholds ─────────────────────────────────────────────
+anomaly_threshold: 3.0   # |z-score| >= this → flag as anomaly
+alert_threshold:   4.0   # |z-score| >= this → immediate webhook POST
+
+# ── Webhook (leave empty to disable) ──────────────────────────────────────
+webhook_url:            ""
+alert_batch_interval_s: 10   # seconds between low-priority batch POSTs
+
+# ── Prometheus metrics ─────────────────────────────────────────────────────
+metrics_port: 9090
+
+# ── Logging ────────────────────────────────────────────────────────────────
+log_path:        "logs/sensor_express.log"
+log_max_size_mb: 10
+log_max_files:   5
