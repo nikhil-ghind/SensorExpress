@@ -6,33 +6,69 @@ A C++17 real-time sensor data pipeline with 5 ms hard deadline guarantees, SCHED
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    broker["MQTT broker<br/>topic sensors/+/data"]
+
+    subgraph nonrt["Non-RT threads"]
+        sub["mqtt_subscriber<br/>libmosquitto callback<br/>JSON to SensorReading"]
+        q["Shared std::queue<br/>mutex + condition_variable"]
+    end
+
+    subgraph rt["RT thread — SCHED_FIFO prio 80, pinned to rt_cpu"]
+        timer["DeadlineTimer<br/>clock_nanosleep TIMER_ABSTIME<br/>1 ms period"]
+        drain["drain_queue<br/>non-blocking, max 50 readings/tick"]
+        stats["RollingStats per sensor_id<br/>Welford mean/variance, O(1)"]
+        judge{"abs z >= anomaly_threshold?"}
+    end
+
+    subgraph out["Output threads"]
+        alert["alert_dispatcher<br/>libcurl HTTP POST webhook<br/>high prio immediate, low prio batched"]
+        metrics["metrics_server<br/>cpp-httplib on metrics_port<br/>GET /metrics"]
+    end
+
+    main["main.cpp<br/>mlockall, YAML config,<br/>SIGINT/SIGTERM shutdown"]
+
+    broker --> sub --> q --> drain
+    timer --> drain --> stats --> judge
+    judge -->|"yes"| cb["result callback in main"]
+    judge -->|"no"| cb
+    cb --> alert
+    cb --> metrics
+    drain -. "cycle > deadline_ms" .-> miss["DeadlineMissed callback"]
+    miss --> metrics
+    main -.->|"starts + configures"| nonrt
+    main -.-> rt
+    main -.-> out
 ```
-MQTT Broker
-    │
-    ▼  (paho / libmosquitto)
-┌─────────────────────┐
-│  mqtt_subscriber    │  Non-RT thread: connects, subscribes sensors/+/data,
-│  (std::queue)       │  parses JSON → SensorReading, pushes to shared queue
-└──────────┬──────────┘
-           │  mutex + condvar
-           ▼
-┌─────────────────────┐
-│  rt_processor       │  SCHED_FIFO prio=80, pinned CPU 1
-│  1 ms DeadlineTimer │  Wakes every 1 ms, drains ≤50 readings/tick
-│  RollingStats/sensor│  Welford mean/variance → z-score → anomaly flag
-│  DeadlineMissed if  │  Logs if cycle > 5 ms deadline
-│  elapsed > 5 ms     │
-└──────────┬──────────┘
-           │  callbacks
-     ┌─────┴──────┐
-     ▼            ▼
-┌─────────┐  ┌──────────────┐
-│  alert  │  │  metrics     │
-│  disp.  │  │  server      │
-│  libcurl│  │  httplib     │
-│  webhook│  │  :9090       │
-│  spdlog │  │  /metrics    │
-└─────────┘  └──────────────┘
+
+A tick of the RT loop looks like this:
+
+```mermaid
+sequenceDiagram
+    participant T as DeadlineTimer
+    participant P as rt_processor
+    participant Q as reading queue
+    participant S as RollingStats
+    participant M as main callbacks
+    participant A as alert_dispatcher
+
+    T->>P: wake at absolute deadline (1 ms period)
+    P->>Q: drain_queue(timeout 0)
+    Q-->>P: up to 50 SensorReading
+    loop per reading
+        P->>S: update(value)
+        S-->>P: mean, stddev, z-score
+        P->>M: ProcessingResult (latency_ns, anomaly)
+        alt abs(z) >= alert_threshold
+            M->>A: enqueue_alert(high priority)
+            A->>A: POST webhook immediately
+        else abs(z) >= anomaly_threshold
+            M->>A: enqueue_alert(low priority)
+            A->>A: hold for batch flush
+        end
+    end
+    P->>M: DeadlineMissed if cycle exceeded deadline_ms
 ```
 
 ---
